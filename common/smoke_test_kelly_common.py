@@ -78,21 +78,33 @@ print("✓ mask_bounds_like_point")
 
 # COMMAND ----------
 
-# ── carry_forward_vintage: freeze lag-1 ──
+# ── carry_forward_vintage: freeze lag-1 (point + bounds) ──
 prev = pd.DataFrame({
     "ds": pd.to_datetime(["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-10"]),
     "ID": ["X"] * 4,
     "Forecast_Vintage": [0.11, np.nan, np.nan, np.nan],
     "Forecast":         [np.nan, 0.22, 0.33, 0.44],
+    "Forecast_Lower":   [np.nan, 0.20, 0.30, 0.40],
+    "Forecast_Upper":   [np.nan, 0.25, 0.36, 0.48],
 })
 vintage_all, meta = kc.carry_forward_vintage(prev, pd.Timestamp("2026-06-05"))
 # 06-01 vintage storico mantenuto; 06-02/03 congelati (<= freeze); 06-10 futuro -> escluso
 assert meta["n_frozen"] == 2
 assert len(vintage_all) == 3
 assert set(vintage_all["ds"].dt.day) == {1, 2, 3}
+assert list(vintage_all.columns) == ["ds", "ID"] + kc.VINTAGE_COLS
+_row2 = vintage_all[vintage_all["ds"] == "2026-06-02"].iloc[0]
+assert (_row2["Forecast_Vintage"], _row2["Forecast_Vintage_Lower"], _row2["Forecast_Vintage_Upper"]) == (0.22, 0.20, 0.25)
+
+# Tabella precedente con schema vecchio (senza colonne bound) -> bound NaN, nessun crash
+prev_old = prev.drop(columns=["Forecast_Lower", "Forecast_Upper"])
+v_old, m_old = kc.carry_forward_vintage(prev_old, pd.Timestamp("2026-06-05"))
+assert m_old["n_frozen"] == 2
+assert v_old["Forecast_Vintage_Lower"].isna().all()
+
 empty_v, empty_meta = kc.carry_forward_vintage(pd.DataFrame(), pd.Timestamp("2026-06-05"))
 assert empty_v.empty and empty_meta["n_frozen"] == 0
-print("✓ carry_forward_vintage")
+print("✓ carry_forward_vintage (trio + retrocompatibilita)")
 
 # COMMAND ----------
 
@@ -105,10 +117,12 @@ raw = pd.DataFrame({
     "Forecast": [0.2],
 })
 fin = kc.finalize_output(raw)
-assert list(fin.columns) == kc.STANDARD_COLS
+assert list(fin.columns) == kc.STANDARD_COLS       # 9 colonne (incl. vintage bounds)
+assert len(kc.STANDARD_COLS) == 9
 assert fin.loc[0, "Actual"] == 0.1235
 assert np.isnan(fin.loc[0, "Forecast_Lower"])
-print("✓ finalize_output")
+assert np.isnan(fin.loc[0, "Forecast_Vintage_Lower"])
+print("✓ finalize_output (9 colonne)")
 
 # COMMAND ----------
 

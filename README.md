@@ -2,8 +2,10 @@
 
 Previsione giornaliera del tasso di assenteismo (y ∈ [0,1]) per plant/turno/reparto con NeuralProphet.
 Ogni notebook di produzione è l'entry point di un job Databricks schedulato (retrain settimanale) e scrive
-una Delta table con **schema standard 7 colonne**:
-`ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper` (intervallo di previsione 90%, round 4).
+una Delta table con **schema standard 9 colonne**:
+`ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper, Forecast_Vintage_Lower, Forecast_Vintage_Upper`
+(intervallo di previsione 90%, round 4). Il trio `Forecast_Vintage*` congela run dopo run ciò che la
+produzione ha pubblicato (lag-1) — inclusi i bound, per misurare la copertura empirica del PI in BI.
 
 ## Layout
 
@@ -15,7 +17,7 @@ la versione vive solo in `MODEL_VERSION` dentro il codice.
 |---|---|
 | `common/kelly_common.py` | Modulo condiviso: metriche, estrazione forecast+quantili, vintage carry-forward, scrittura Delta, notifiche Teams, validazioni. Importato da tutti i notebook prod. |
 | `common/smoke_test_kelly_common.py` | Smoke test del modulo — eseguirlo su Databricks dopo ogni modifica a `kelly_common.py`. |
-| `Kelly_ATL/kelly_atl_forecast.py` | Atlanta DC (2 modelli A/B + vintage trainato) → `kelly.kelly_atl_forecast` + CSV |
+| `Kelly_ATL/kelly_atl_forecast.py` | Atlanta DC (2 modelli A/B; vintage lag-1) → `kelly.kelly_atl_forecast` + CSV |
 | `Kelly_COL/kelly_col_forecast.py` | Columbus DC → `kelly.kelly_col_forecast` |
 | `Kelly_DA/kelly_da_forecast.py` | Dallas DC → `kelly.kelly_da_forecast` |
 | `Kelly_MX/kelly_mx_forecast.py` | Tijuana (JDBC SQL Server) → `kelly.kelly_mx_forecast` |

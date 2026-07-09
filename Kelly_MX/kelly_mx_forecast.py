@@ -27,6 +27,7 @@
 # MAGIC
 # MAGIC | Versione | Data | Modifica |
 # MAGIC |----------|------|----------|
+# MAGIC | 3.2 | 2026-07-09 | **Vintage bounds.** Congelati anche `Forecast_Vintage_Lower`/`_Upper` con la stessa logica lag-1 per-shift — misurabile la copertura empirica del PI 90% (schema a 9 colonne). |
 # MAGIC | 3.1 | 2026-07-08 | **Schema standard + intervalli di previsione.** `quantiles=[0.05,0.95]` (PI 90%); Delta table con schema standard 7 colonne (`ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper`) — le 5 colonne metadata (Plant, Frequency, Run_Date, Model_Version, Last_Obs_Date) restano solo in `run_history.csv`. Credenziali JDBC e webhook Teams migrati a `dbutils.secrets` (scope `kelly`). Fix: chiamata a `_notify_email` inesistente (NameError sul path stale-data); guard divisione TotalHours=0; vintage read senza `except Exception` generico. Modulo condiviso `common/kelly_common.py`. |
 # MAGIC | 3.0 | 2026-05-12 | **Migrazione a frequenza giornaliera (business days).** n_forecasts=30, n_lags=14, weekly_seasonality=True. Nessun gap tra Actual e Forecast in Power BI. |
 # MAGIC | 2.3 | 2026-05-12 | Eliminato modello vintage separato. Forecast_Vintage = lag-1 dal run precedente. |
@@ -134,7 +135,7 @@ JDBC_QUERY = """
 TARGET_SHIFTS  = ['A', 'B', 'C', 'D']
 START_DATE     = pd.Timestamp('2024-01-01')
 FORECAST_DAYS  = 30   # orizzonte forecast giornaliero (~30 giorni)
-MODEL_VERSION  = 'v3.0'
+MODEL_VERSION  = 'v3.2'
 
 SEED = 42
 set_random_seed(SEED)
@@ -572,11 +573,19 @@ prev_df = kc.read_delta_or_none(spark, TABLE_NAME)
 if prev_df is None or prev_df.empty:
     print('⚠️  Delta table non trovata o vuota (primo run).')
     print('   Forecast_Vintage sarà NaN per questo run.')
-    all_vintage = pd.DataFrame(columns=['ds', 'ID', 'Forecast_Vintage'])
+    all_vintage = pd.DataFrame(columns=['ds', 'ID'] + kc.VINTAGE_COLS)
 else:
     prev_df['ds'] = pd.to_datetime(prev_df['ds'])
-    prev_df['Forecast'] = pd.to_numeric(prev_df['Forecast'], errors='coerce')
-    prev_df['Forecast_Vintage'] = pd.to_numeric(prev_df.get('Forecast_Vintage'), errors='coerce')
+    # v3.2: colonne bound mancanti (tabella con schema vecchio) -> NaN
+    for _c in ['Forecast_Lower', 'Forecast_Upper'] + kc.VINTAGE_COLS:
+        if _c not in prev_df.columns:
+            prev_df[_c] = np.nan
+    for _c in ['Forecast'] + ['Forecast_Lower', 'Forecast_Upper'] + kc.VINTAGE_COLS:
+        prev_df[_c] = pd.to_numeric(prev_df[_c], errors='coerce')
+
+    _LAG1_RENAME = {'Forecast': 'Forecast_Vintage',
+                    'Forecast_Lower': 'Forecast_Vintage_Lower',
+                    'Forecast_Upper': 'Forecast_Vintage_Upper'}
 
     # --- NUOVO: Vintage per-shift ---
     # Per ogni turno, prendi le date dove il run precedente aveva un Forecast
@@ -584,33 +593,32 @@ else:
     curr_actual_dates = (
         df[df['y'].notna()].groupby('ID')['ds'].apply(set).to_dict()
     )
-    
+
     new_vintage_rows = []
     for shift_id in TARGET_SHIFTS:
         prev_shift = prev_df[prev_df['ID'] == shift_id]
-        # Zona forecast del run precedente per questo turno
-        prev_has_forecast = prev_shift[prev_shift['Forecast'].notna()][['ds', 'ID', 'Forecast']]
-        
+        # Zona forecast del run precedente per questo turno (point + bound insieme)
+        prev_has_forecast = prev_shift[prev_shift['Forecast'].notna()][
+            ['ds', 'ID', 'Forecast', 'Forecast_Lower', 'Forecast_Upper']]
+
         # Date che ORA hanno actual (= possiamo confrontare previsione vs realtà)
         shift_actuals = curr_actual_dates.get(shift_id, set())
-        
+
         # Overlap: predetto nel run precedente E ora verificabile
         shift_vintage = prev_has_forecast[prev_has_forecast['ds'].isin(shift_actuals)]
         if len(shift_vintage) > 0:
-            new_vintage_rows.append(
-                shift_vintage.rename(columns={'Forecast': 'Forecast_Vintage'})
-            )
-    
+            new_vintage_rows.append(shift_vintage.rename(columns=_LAG1_RENAME))
+
     if new_vintage_rows:
         vintage_from_prev = pd.concat(new_vintage_rows, ignore_index=True)
     else:
-        vintage_from_prev = pd.DataFrame(columns=['ds', 'ID', 'Forecast_Vintage'])
-    
+        vintage_from_prev = pd.DataFrame(columns=['ds', 'ID'] + kc.VINTAGE_COLS)
+
     # Storico vintage accumulato (già consolidato nei run precedenti)
     prev_vintage_history = prev_df[
-        (prev_df['Forecast_Vintage'].notna()) & 
+        (prev_df['Forecast_Vintage'].notna()) &
         (prev_df['ID'].isin(TARGET_SHIFTS))  # solo turni reali, General ricalcolato
-    ][['ds', 'ID', 'Forecast_Vintage']]
+    ][['ds', 'ID'] + kc.VINTAGE_COLS]
     
     # Rimuovi duplicati: se un giorno ha già vintage nello storico, non sovrascrivere
     if len(prev_vintage_history) > 0 and len(vintage_from_prev) > 0:
@@ -640,11 +648,12 @@ merged_df = (
     .reset_index(drop=True)
 )
 
-# 3. Aggiungi Forecast_Vintage (lag-1 accumulato)
+# 3. Aggiungi il trio Forecast_Vintage(_Lower/_Upper) (lag-1 accumulato)
 if len(all_vintage) > 0:
     merged_df = merged_df.merge(all_vintage, on=['ds', 'ID'], how='left')
 else:
-    merged_df['Forecast_Vintage'] = np.nan
+    for _c in kc.VINTAGE_COLS:
+        merged_df[_c] = np.nan
 
 # Fix dtype numerico
 for _c in kc.NUMERIC_COLS:
@@ -812,15 +821,15 @@ plt.show()
 # MAGIC ## 16. Output Delta Table (Power BI)
 # MAGIC
 # MAGIC Scrive `merged_df` su Delta table Unity Catalog per connessione diretta Power BI.
-# MAGIC **v3.1 — schema standard 7 colonne** (identico a tutte le geografie):
-# MAGIC `ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper`.
+# MAGIC **v3.2 — schema standard 9 colonne** (identico a tutte le geografie):
+# MAGIC `ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper, Forecast_Vintage_Lower, Forecast_Vintage_Upper`.
 # MAGIC Le colonne metadata restano per-run in `run_history.csv`.
 
 # COMMAND ----------
 
 # DBTITLE 1,Write Delta table for Power BI
 # =============================================================================
-# 16. DELTA TABLE OUTPUT — Power BI (schema standard 7 colonne, v3.1)
+# 16. DELTA TABLE OUTPUT — Power BI (schema standard 9 colonne, v3.2)
 # =============================================================================
 
 # FIX: lasciare NaN per giorni di riposo (días de descanso) anziché forzare a 1.0
@@ -828,8 +837,9 @@ plt.show()
 # e non vengono mostrati in Power BI — comportamento corretto.
 # Non facciamo più fillna(1) — i NaN storici sono giorni non lavorati dal turno
 
-# v3.1 — SCHEMA STANDARD 7 COLONNE (identico a tutte le geografie):
-# ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper.
+# v3.2 — SCHEMA STANDARD 9 COLONNE (identico a tutte le geografie):
+# ds, ID, Actual, Forecast_Vintage, Forecast, Forecast_Lower, Forecast_Upper,
+# Forecast_Vintage_Lower, Forecast_Vintage_Upper.
 # Le colonne metadata (Plant, Frequency, Run_Date, Model_Version, Last_Obs_Date)
 # NON sono piu nella Delta table: restano per-run in run_history.csv.
 output_df = kc.finalize_output(merged_df)

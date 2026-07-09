@@ -9,6 +9,10 @@
 # MAGIC
 # MAGIC ## Changelog
 # MAGIC
+# MAGIC ### v1.5 — 2026-07-09 (vintage bounds)
+# MAGIC - **Congelati anche i bound**: `Forecast_Vintage_Lower` / `Forecast_Vintage_Upper` con la stessa
+# MAGIC   logica lag-1 del point — permette di misurare la copertura empirica del PI 90% (schema a 9 colonne).
+# MAGIC
 # MAGIC ### v1.4 — 2026-07-08 (schema standard + intervalli di previsione)
 # MAGIC - **Prediction interval 90%**: `quantiles=[0.05, 0.95]` nel modello; nuove colonne
 # MAGIC   `Forecast_Lower` / `Forecast_Upper` nella Delta table (schema standard 7 colonne per tutte le geografie).
@@ -474,7 +478,8 @@ merged_df = (
     .sort_values(['ds', 'ID'])
     .reset_index(drop=True)
 )
-merged_df['Forecast_Vintage'] = np.nan          # placeholder: popolata dalla cella carry-forward
+for _c in kc.VINTAGE_COLS:
+    merged_df[_c] = np.nan                       # placeholder: popolate dalla cella carry-forward
 merged_df = merged_df[kc.STANDARD_COLS]
 
 # Maschera weekend + festività nei forecast (giorni non lavorativi -> NaN)
@@ -734,11 +739,12 @@ prev = kc.read_delta_or_none(spark, OUTPUT_TABLE)
 if prev is None or prev.empty:
     print('Nessuna tabella precedente: Forecast_Vintage lasciato invariato.')
 else:
+    # v1.5: congela anche i bound (Forecast_Vintage_Lower/Upper) con la stessa logica
     vintage_all, _vmeta = kc.carry_forward_vintage(prev, FREEZE_UNTIL)
 
-    # applica al merged_df corrente (sovrascrive il placeholder)
+    # applica al merged_df corrente (sovrascrive i placeholder)
     merged_df = (
-        merged_df.drop(columns=['Forecast_Vintage'])
+        merged_df.drop(columns=kc.VINTAGE_COLS, errors='ignore')
                  .merge(vintage_all, on=['ds', 'ID'], how='left')
                  [kc.STANDARD_COLS]
                  .sort_values(['ds', 'ID']).reset_index(drop=True)
@@ -746,7 +752,10 @@ else:
 
     # maschera giorni non lavorativi anche sul vintage
     is_nw = (merged_df['ds'].dt.dayofweek >= 5) | merged_df['ds'].isin(all_holidays)
-    merged_df.loc[is_nw, 'Forecast_Vintage'] = np.nan
+    for _c in kc.VINTAGE_COLS:
+        merged_df.loc[is_nw, _c] = np.nan
+    merged_df = kc.mask_bounds_like_point(
+        merged_df, 'Forecast_Vintage', 'Forecast_Vintage_Lower', 'Forecast_Vintage_Upper')
 
     print(f'Vintage da tabella Delta')
     _lvd = _vmeta['last_vintage_date']

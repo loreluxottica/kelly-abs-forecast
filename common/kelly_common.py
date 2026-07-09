@@ -23,13 +23,16 @@ import pandas as pd
 # Intervallo di previsione 90% (quantile regression NeuralProphet)
 QUANTILES = [0.05, 0.95]
 
-# Schema standard delle Delta table di output (tutte le geografie)
+# Schema standard delle Delta table di output (tutte le geografie).
+# I bound vintage sono APPESI in coda per non spostare le colonne esistenti in BI.
 STANDARD_COLS = [
     "ds", "ID", "Actual", "Forecast_Vintage",
     "Forecast", "Forecast_Lower", "Forecast_Upper",
+    "Forecast_Vintage_Lower", "Forecast_Vintage_Upper",
 ]
 NUMERIC_COLS = STANDARD_COLS[2:]
-FORECAST_COLS = ["Forecast", "Forecast_Vintage", "Forecast_Lower", "Forecast_Upper"]
+VINTAGE_COLS = ["Forecast_Vintage", "Forecast_Vintage_Lower", "Forecast_Vintage_Upper"]
+FORECAST_COLS = ["Forecast", "Forecast_Lower", "Forecast_Upper"] + VINTAGE_COLS
 
 ROUND_DECIMALS = 4
 
@@ -254,33 +257,49 @@ def read_delta_or_none(spark, table_name: str, columns: list | None = None):
 
 def carry_forward_vintage(prev_df: pd.DataFrame,
                           freeze_until: pd.Timestamp) -> tuple:
-    """Logica lag-1 COL/DA: congela il Forecast del run precedente (date ormai
-    trascorse, <= freeze_until) in Forecast_Vintage, mantenendo il vintage gia'
-    accumulato. Ritorna (vintage_all[ds, ID, Forecast_Vintage], meta dict)."""
+    """Logica lag-1: congela Forecast (+ Forecast_Lower/Upper) del run precedente
+    per le date ormai trascorse (<= freeze_until) nel trio Forecast_Vintage
+    (+ _Lower/_Upper), mantenendo il vintage gia' accumulato. Tollera tabelle
+    precedenti senza le colonne bound (schema pre-quantili) -> NaN.
+    Ritorna (vintage_all[ds, ID, VINTAGE_COLS], meta dict)."""
     if prev_df is None or prev_df.empty:
-        empty = pd.DataFrame(columns=["ds", "ID", "Forecast_Vintage"])
+        # dtypes espliciti: un ds object su frame vuoto rompe il merge con datetime
+        empty = pd.DataFrame({
+            "ds": pd.Series(dtype="datetime64[ns]"),
+            "ID": pd.Series(dtype="object"),
+            **{c: pd.Series(dtype="float64") for c in VINTAGE_COLS},
+        })
         return empty, {"last_vintage_date": pd.NaT, "n_frozen": 0}
 
     prev_df = prev_df.copy()
     prev_df["ds"] = pd.to_datetime(prev_df["ds"])
+    # Colonne mancanti (tabella con schema vecchio) -> NaN
+    for c in ["Forecast_Lower", "Forecast_Upper"] + VINTAGE_COLS:
+        if c not in prev_df.columns:
+            prev_df[c] = np.nan
 
     last_vintage_date = prev_df.loc[prev_df["Forecast_Vintage"].notna(), "ds"].max()
     if pd.isna(last_vintage_date):
         last_vintage_date = prev_df["ds"].min() - pd.Timedelta(days=1)
 
+    # Il freeze e' guidato dal point forecast: i bound seguono la stessa maschera
     mask_freeze = (
         (prev_df["ds"] > last_vintage_date)
         & (prev_df["ds"] <= freeze_until)
         & prev_df["Forecast"].notna()
     )
     frozen = (
-        prev_df.loc[mask_freeze, ["ds", "ID", "Forecast"]]
-        .rename(columns={"Forecast": "Forecast_Vintage"})
+        prev_df.loc[mask_freeze, ["ds", "ID", "Forecast", "Forecast_Lower", "Forecast_Upper"]]
+        .rename(columns={
+            "Forecast": "Forecast_Vintage",
+            "Forecast_Lower": "Forecast_Vintage_Lower",
+            "Forecast_Upper": "Forecast_Vintage_Upper",
+        })
     )
     vintage_all = (
         pd.concat(
             [prev_df.loc[prev_df["Forecast_Vintage"].notna(),
-                         ["ds", "ID", "Forecast_Vintage"]],
+                         ["ds", "ID"] + VINTAGE_COLS],
              frozen],
             ignore_index=True,
         )

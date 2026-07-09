@@ -7,7 +7,7 @@
 # MAGIC   - Input: SQL Server via JDBC (tabella Operations.dbo.absenteeism_by_dept_area)
 # MAGIC   - Struttura ID: Shift{1-4} x Department_Area → raggruppati in Gruppo A (Mar-Ven) e B (Lun/Sab/Dom)
 # MAGIC   - Aggregati sintetici: General_A (Shift1+2) e General_B (Shift3+4) — media pesata per roster_hc
-# MAGIC   - Modelli separati per gruppo A e B (4 modelli: current + eval x 2)
+# MAGIC   - Modelli separati per gruppo A e B (2 modelli current; vintage = lag-1 dalla Delta table, v2.9)
 # MAGIC   - Orizzonte forecast: 30 giorni
 # MAGIC   - Holiday country: US
 # MAGIC   - Eventi: Easter/Good Friday (calcolati), Eid al-Fitr, Super Bowl, NBA Finals, World Series, March Madness, US Open Tennis, School Start/End
@@ -16,6 +16,14 @@
 # MAGIC
 # MAGIC ---
 # MAGIC ### Changelog
+# MAGIC
+# MAGIC **v2.9** (2026-07-09) — Vintage lag-1 + vintage bounds
+# MAGIC - **Vintage = lag-1 carry-forward dalla Delta table** (come COL/DA/MX/IT, cfr. MX v2.3): eliminati i
+# MAGIC   2 modelli vintage trainati — il vintage ora misura cio' che la prod ha realmente pubblicato e il
+# MAGIC   job e' ~2x piu veloce. La finestra di valutazione/quality flag si riempie in ~4-5 run settimanali
+# MAGIC   dopo lo switch (guard su eval vuota).
+# MAGIC - **Vintage bounds**: congelati anche `Forecast_Vintage_Lower`/`_Upper` — misurabile la copertura
+# MAGIC   empirica del PI 90% (schema a 9 colonne).
 # MAGIC
 # MAGIC **v2.8** (2026-07-08) — Schema standard + intervalli di previsione
 # MAGIC - **Prediction interval 90%** — `quantiles=[0.05, 0.95]` sui modelli CURRENT (i vintage restano point-only);
@@ -147,7 +155,7 @@ HISTORY_CSV          = REPORT_PATH / "kelly_atl_run_history.csv"
 FORECAST_LOG_CSV     = REPORT_PATH / "kelly_atl_forecast_log.csv"
 
 # Versione del modello: aggiornare manualmente quando cambiano i config
-MODEL_VERSION = "v2.8"
+MODEL_VERSION = "v2.9"
 
 # Orizzonte di forecast (giorni)
 FORECAST_HORIZON = 30
@@ -538,10 +546,12 @@ split_date_vintage  = split_date - timedelta(days=FORECAST_HORIZON)
 
 
 def make_splits(df_full, ids, work_days, start=None):
-    """Filtra per IDs, work days e finestre temporali.
+    """Filtra per IDs, work days e finestra temporale (<= split_date).
     start: data di inizio opzionale; se None usa start_date globale.
     v2.8: righe y=NaN scartate prima del fit (approccio MX) — i giorni non
     osservati non entrano piu nel training come y=1.
+    v2.9: ritorna solo il train corrente — il vintage e' lag-1 dalla Delta
+    table (niente piu modelli vintage trainati).
     """
     _start = start if start is not None else start_date
     base = df_full[
@@ -550,21 +560,16 @@ def make_splits(df_full, ids, work_days, start=None):
         (df_full["ds"] >= _start) &
         df_full["y"].notna()
     ].drop(columns=["Actual"], errors="ignore").reset_index(drop=True)
-    return (
-        base[base["ds"] <= split_date_vintage],
-        base[base["ds"] <= split_date],
-    )
+    return base[base["ds"] <= split_date]
 
 
-with timed("Creazione split train/vintage A e B"):
-    train_df_vintage_A, train_df_A = make_splits(df, ids_A, WORK_DAYS["A"])
+with timed("Creazione split train A e B"):
+    train_df_A = make_splits(df, ids_A, WORK_DAYS["A"])
     # Gruppo B: start 2024-01-01 — esclude vecchio regime (2022: 47%) e transizione (2023: 36%)
-    train_df_vintage_B, train_df_B = make_splits(df, ids_B, WORK_DAYS["B"], start=pd.Timestamp("2024-01-01"))
+    train_df_B = make_splits(df, ids_B, WORK_DAYS["B"], start=pd.Timestamp("2024-01-01"))
 
-log.info(f"Train A:         {train_df_A['ds'].min().date()} — {train_df_A['ds'].max().date()} ({len(train_df_A):,} righe, {train_df_A['ID'].nunique()} IDs)")
-log.info(f"Train vintage A: {train_df_vintage_A['ds'].min().date()} — {train_df_vintage_A['ds'].max().date()} ({len(train_df_vintage_A):,} righe)")
-log.info(f"Train B:         {train_df_B['ds'].min().date()} — {train_df_B['ds'].max().date()} ({len(train_df_B):,} righe, {train_df_B['ID'].nunique()} IDs)")
-log.info(f"Train vintage B: {train_df_vintage_B['ds'].min().date()} — {train_df_vintage_B['ds'].max().date()} ({len(train_df_vintage_B):,} righe)")
+log.info(f"Train A: {train_df_A['ds'].min().date()} — {train_df_A['ds'].max().date()} ({len(train_df_A):,} righe, {train_df_A['ID'].nunique()} IDs)")
+log.info(f"Train B: {train_df_B['ds'].min().date()} — {train_df_B['ds'].max().date()} ({len(train_df_B):,} righe, {train_df_B['ID'].nunique()} IDs)")
 
 # COMMAND ----------
 
@@ -610,8 +615,8 @@ def build_model_A(quantiles: list | None = None) -> NeuralProphet:
 
     Parametri ottimizzati via parameter search (WMAE=0.0227, -28% vs v2.6).
     CV 5-fold: WMAE=0.0392 ± 0.0120.
-    v2.8: quantiles opzionale — passato solo ai modelli CURRENT (PI 90%);
-    i modelli vintage restano point-only.
+    v2.8: quantiles opzionale (PI 90%). v2.9: esistono solo i modelli current —
+    il vintage e' lag-1 dalla Delta table.
     """
     _params = dict(_MODEL_A_PARAMS, **({"quantiles": quantiles} if quantiles else {}))
     m = NeuralProphet(**_params)
@@ -672,25 +677,13 @@ log.info(f"Checkpoint salvati: {_ckpt_A.name} | {_ckpt_B.name}")
 
 # COMMAND ----------
 
-# DBTITLE 1,Training vintage models A and B
+# DBTITLE 1,Vintage = lag-1 (v2.9)
 # =============================================================================
-# 9. TRAINING VINTAGE (m_vintage_A, m_vintage_B)
+# 9. VINTAGE — v2.9: NIENTE PIU MODELLI VINTAGE TRAINATI.
+# Forecast_Vintage(_Lower/_Upper) = lag-1 carry-forward dalla Delta table del
+# run precedente (stessa semantica di COL/DA/MX/IT — misura cio' che la prod
+# ha realmente pubblicato; job ~2x piu veloce). Vedi cella dopo il post-processing.
 # =============================================================================
-with timed("Training modello vintage A (Shift1/2 — Mar-Ven)"):
-    m_vintage_A = build_model_A()
-    metrics_vintage_A = m_vintage_A.fit(train_df_vintage_A, freq="D")
-
-final_loss_vintage_A = float(metrics_vintage_A["Loss"].iloc[-1]) if metrics_vintage_A is not None and "Loss" in metrics_vintage_A.columns else None
-n_epochs_vintage_A   = len(metrics_vintage_A) if metrics_vintage_A is not None else None
-log.info(f"Loss finale (vintage A): {final_loss_vintage_A}")
-
-with timed("Training modello vintage B (Shift3/4 — Lun/Sab/Dom)"):
-    m_vintage_B = build_model_B()
-    metrics_vintage_B = m_vintage_B.fit(train_df_vintage_B, freq="D")
-
-final_loss_vintage_B = float(metrics_vintage_B["Loss"].iloc[-1]) if metrics_vintage_B is not None and "Loss" in metrics_vintage_B.columns else None
-n_epochs_vintage_B   = len(metrics_vintage_B) if metrics_vintage_B is not None else None
-log.info(f"Loss finale (vintage B): {final_loss_vintage_B}")
 
 # Libera memoria PyTorch prima dei plot (evita crash C-level del renderer matplotlib)
 try:
@@ -709,25 +702,17 @@ with timed("Generazione forecast"):
     # (Easter, Super Bowl, scuola, ...) valevano 0 su tutto l'orizzonte forecast.
     _ev_current = kc.build_future_events_long(
         important_sporting_events, split_date, split_date + timedelta(days=FORECAST_HORIZON))
-    _ev_vintage = kc.build_future_events_long(
-        important_sporting_events, split_date_vintage, split_date_vintage + timedelta(days=FORECAST_HORIZON))
     _n_ev_c = len(_ev_current) if _ev_current is not None else 0
-    _n_ev_v = len(_ev_vintage) if _ev_vintage is not None else 0
-    log.info(f"Eventi futuri nell'orizzonte: current={_n_ev_c} | vintage={_n_ev_v}")
+    log.info(f"Eventi futuri nell'orizzonte: {_n_ev_c}")
 
-    future_A         = m_A.make_future_dataframe(train_df_A, periods=FORECAST_HORIZON, events_df=_ev_current)
-    future_B         = m_B.make_future_dataframe(train_df_B, periods=FORECAST_HORIZON, events_df=_ev_current)
-    future_vintage_A = m_vintage_A.make_future_dataframe(train_df_vintage_A, periods=FORECAST_HORIZON, events_df=_ev_vintage)
-    future_vintage_B = m_vintage_B.make_future_dataframe(train_df_vintage_B, periods=FORECAST_HORIZON, events_df=_ev_vintage)
+    future_A = m_A.make_future_dataframe(train_df_A, periods=FORECAST_HORIZON, events_df=_ev_current)
+    future_B = m_B.make_future_dataframe(train_df_B, periods=FORECAST_HORIZON, events_df=_ev_current)
 
-    forecast_A         = m_A.predict(future_A)
-    forecast_B         = m_B.predict(future_B)
-    forecast_vintage_A = m_vintage_A.predict(future_vintage_A)
-    forecast_vintage_B = m_vintage_B.predict(future_vintage_B)
+    forecast_A = m_A.predict(future_A)
+    forecast_B = m_B.predict(future_B)
 
     # Concatena per mantenere compatibilità con il post-processing
-    forecast         = pd.concat([forecast_A, forecast_B], ignore_index=True)
-    forecast_vintage = pd.concat([forecast_vintage_A, forecast_vintage_B], ignore_index=True)
+    forecast = pd.concat([forecast_A, forecast_B], ignore_index=True)
 
 log.info(f"Forecast A: {len(forecast_A):,} righe | Forecast B: {len(forecast_B):,} righe")
 
@@ -749,6 +734,14 @@ off_days_A = [d for d in range(7) if d not in WORK_DAYS["A"]]  # [0, 5, 6]
 off_days_B = [d for d in range(7) if d not in WORK_DAYS["B"]]  # [1, 2, 3, 4]
 
 
+def _group_off_mask(frame: pd.DataFrame) -> pd.Series:
+    """True nei giorni off per il gruppo dell'ID (non operativi = nessun forecast)."""
+    dow = frame["ds"].dt.dayofweek
+    mask_A_off = dow.isin(off_days_A) & frame["ID"].str.startswith(("Shift1", "Shift2", "General_A"))
+    mask_B_off = dow.isin(off_days_B) & frame["ID"].str.startswith(("Shift3", "Shift4", "General_B"))
+    return mask_A_off | mask_B_off
+
+
 def _postprocess(forecast_df: pd.DataFrame, model_A: NeuralProphet, model_B: NeuralProphet,
                  col_name: str, with_bounds: bool = False) -> pd.DataFrame:
     """
@@ -760,32 +753,49 @@ def _postprocess(forecast_df: pd.DataFrame, model_A: NeuralProphet, model_B: Neu
     out = kc.extract_latest_forecast(forecast_df, _model_for_id, col_name, with_bounds=with_bounds)
 
     out[col_name] = np.where(out[col_name] > 0.65, np.nan, out[col_name])
-
-    dow = out["ds"].dt.dayofweek
-    # Off-days gruppo A
-    mask_A_off = dow.isin(off_days_A) & out["ID"].str.startswith(("Shift1", "Shift2", "General_A"))
-    # Off-days gruppo B
-    mask_B_off = dow.isin(off_days_B) & out["ID"].str.startswith(("Shift3", "Shift4", "General_B"))
-    out.loc[mask_A_off | mask_B_off, col_name] = np.nan
+    out.loc[_group_off_mask(out), col_name] = np.nan
 
     if with_bounds:
         out = kc.mask_bounds_like_point(out, col_name, f"{col_name}_Lower", f"{col_name}_Upper")
     return out
 
 
-with timed("Post-processing forecast"):
-    df_forecast         = _postprocess(forecast,         m_A, m_B, col_name="Forecast", with_bounds=True)
-    df_forecast_vintage = _postprocess(forecast_vintage, m_vintage_A, m_vintage_B, col_name="Forecast_Vintage")
+with timed("Post-processing forecast + vintage lag-1"):
+    df_forecast = _postprocess(forecast, m_A, m_B, col_name="Forecast", with_bounds=True)
 
-    # Costruzione merged_df: Actual + Forecast_Vintage + Forecast (+ bounds)
+    # Costruzione merged_df: Actual + Forecast (+ bounds)
     df_actual = df[["ds", "ID", "Actual"]].copy()
 
     merged_df = (
         df_actual
-        .merge(df_forecast_vintage[["ds", "ID", "Forecast_Vintage"]], on=["ds", "ID"], how="outer")
         .merge(df_forecast[["ds", "ID", "Forecast", "Forecast_Lower", "Forecast_Upper"]], on=["ds", "ID"], how="outer")
-        [kc.STANDARD_COLS]
     )
+
+    # -- v2.9: Vintage = lag-1 carry-forward dalla Delta table -----------------
+    # Congela Forecast(_Lower/_Upper) del run precedente per le date trascorse
+    # nel trio Forecast_Vintage*, mantenendo il vintage gia' accumulato.
+    FREEZE_UNTIL = pd.Timestamp.today().normalize()
+    prev_df = kc.read_delta_or_none(spark, "`sbx-logistics`.kelly.kelly_atl_forecast")
+    vintage_all, _vmeta = kc.carry_forward_vintage(prev_df, FREEZE_UNTIL)
+
+    merged_df = (
+        merged_df
+        .merge(vintage_all, on=["ds", "ID"], how="left")
+        [kc.STANDARD_COLS]
+        .sort_values(["ds", "ID"]).reset_index(drop=True)
+    )
+
+    # Ri-applica le maschere off-day per gruppo anche al vintage
+    _off = _group_off_mask(merged_df)
+    for _c in kc.VINTAGE_COLS:
+        merged_df.loc[_off, _c] = np.nan
+    merged_df = kc.mask_bounds_like_point(
+        merged_df, "Forecast_Vintage", "Forecast_Vintage_Lower", "Forecast_Vintage_Upper")
+
+    _lvd = _vmeta["last_vintage_date"]
+    log.info(f"Vintage lag-1: last_vintage_date={_lvd.date() if pd.notna(_lvd) else 'N/A'} "
+             f"| punti congelati={_vmeta['n_frozen']} "
+             f"| vintage totale={merged_df['Forecast_Vintage'].notna().sum()}")
 
 # COMMAND ----------
 
@@ -822,41 +832,51 @@ with timed("Calcolo metriche"):
     # v2.8: helper condiviso (stessa formula, NaN-pair-safe)
     compute_metrics = kc.compute_metrics
 
-    global_metrics = compute_metrics(df_eval["Actual"], df_eval["Forecast_Vintage"])
+    # v2.9: dopo lo switch a vintage lag-1 la finestra eval si riempie in
+    # ~4-5 run settimanali — con eval vuota le metriche vengono saltate.
+    _METRIC_KEYS = ["MAE", "Bias", "RMSE", "SMAPE", "WMAE", "N"]
+    if df_eval.empty:
+        log.warning("⚠️  Nessun punto valutabile (vintage lag-1 in accumulo) — metriche saltate per questo run")
+        global_metrics = compute_metrics(pd.Series(dtype=float), pd.Series(dtype=float))
+        per_id_metrics = pd.DataFrame(columns=["ID"] + _METRIC_KEYS + ["Actual_Mean_Last30d"])
+        weekly_metrics = pd.DataFrame(columns=["year_week"] + _METRIC_KEYS)
+        weekly_by_id   = pd.DataFrame(columns=["year_week", "ID"] + _METRIC_KEYS)
+    else:
+        global_metrics = compute_metrics(df_eval["Actual"], df_eval["Forecast_Vintage"])
 
-    per_id_metrics = (
-        df_eval.groupby("ID")
-        .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
-        .reset_index()
-    )
+        per_id_metrics = (
+            df_eval.groupby("ID")
+            .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
+            .reset_index()
+        )
 
-    last_30 = (
-        merged_df[
-            (merged_df["ds"] > split_date_vintage) &
-            (merged_df["ds"] <= split_date) &
-            (merged_df["Actual"] < 1)
-        ]
-        .groupby("ID")["Actual"].mean().round(4).rename("Actual_Mean_Last30d")
-    )
-    per_id_metrics = per_id_metrics.merge(last_30.reset_index(), on="ID", how="left")
+        last_30 = (
+            merged_df[
+                (merged_df["ds"] > split_date_vintage) &
+                (merged_df["ds"] <= split_date) &
+                (merged_df["Actual"] < 1)
+            ]
+            .groupby("ID")["Actual"].mean().round(4).rename("Actual_Mean_Last30d")
+        )
+        per_id_metrics = per_id_metrics.merge(last_30.reset_index(), on="ID", how="left")
 
-    # Metriche settimanali
-    _iso = df_eval["ds"].dt.isocalendar()
-    df_eval["year_week"] = _iso["year"].astype(str) + "-W" + _iso["week"].astype(str).str.zfill(2)
+        # Metriche settimanali
+        _iso = df_eval["ds"].dt.isocalendar()
+        df_eval["year_week"] = _iso["year"].astype(str) + "-W" + _iso["week"].astype(str).str.zfill(2)
 
-    weekly_metrics = (
-        df_eval.groupby("year_week")
-        .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
-        .reset_index()
-        .sort_values("year_week")
-    )
+        weekly_metrics = (
+            df_eval.groupby("year_week")
+            .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
+            .reset_index()
+            .sort_values("year_week")
+        )
 
-    weekly_by_id = (
-        df_eval.groupby(["year_week", "ID"])
-        .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
-        .reset_index()
-        .sort_values(["year_week", "ID"])
-    )
+        weekly_by_id = (
+            df_eval.groupby(["year_week", "ID"])
+            .apply(lambda g: pd.Series(compute_metrics(g["Actual"], g["Forecast_Vintage"])))
+            .reset_index()
+            .sort_values(["year_week", "ID"])
+        )
 
 # ── Display metriche globali ────────────────────────────────────────────────────
 print("=" * 70)
@@ -993,7 +1013,10 @@ with timed("Verdetti per ID"):
     # Print
     print("VERDETTO PER ID:")
     print("-" * 70)
-    display(pd.DataFrame(per_id_verdicts).T.sort_values("verdict").reset_index().rename(columns={"index": "ID"}))
+    if per_id_verdicts:
+        display(pd.DataFrame(per_id_verdicts).T.sort_values("verdict").reset_index().rename(columns={"index": "ID"}))
+    else:
+        print("(nessun verdetto — vintage lag-1 in accumulo)")
 
 # COMMAND ----------
 
@@ -1057,9 +1080,9 @@ with timed("Salvataggio Excel dati"):
 
 log.info(f"Dati salvati: {output_file}")
 
-# Scrivi anche su Delta table per Power BI — v2.8: schema standard 7 colonne,
-# round(4), overwrite + overwriteSchema (prima mancava: il primo run a 7
-# colonne sarebbe fallito sullo schema esistente a 5).
+# Scrivi anche su Delta table per Power BI — v2.9: schema standard 9 colonne
+# (kc.STANDARD_COLS: point + bounds + vintage trio), round(4),
+# overwrite + overwriteSchema.
 _n_rows = kc.write_forecast_table(spark, merged_df.assign(Actual=_actual_out),
                                   "`sbx-logistics`.kelly.kelly_atl_forecast")
 log.info(f"Delta table kelly_atl_forecast scritta: {_n_rows} righe")
@@ -1215,15 +1238,13 @@ history_row = pd.DataFrame([{
     # Training
     "loss_current_A":       final_loss_A,
     "loss_current_B":       final_loss_B,
-    "loss_vintage_A":       final_loss_vintage_A,
-    "loss_vintage_B":       final_loss_vintage_B,
+    # v2.9: niente piu modelli vintage trainati (vintage = lag-1 dalla Delta table)
+    "vintage_frozen_points": _vmeta["n_frozen"],
     "checkpoint_A":         str(_ckpt_A),
     "checkpoint_B":         str(_ckpt_B),
     # Timing
     "time_training_current_A_sec": _timings.get("Training modello current A (Shift1/2 \u2014 Mar-Ven)"),
     "time_training_current_B_sec": _timings.get("Training modello current B (Shift3/4 \u2014 Lun/Sab/Dom)"),
-    "time_training_vintage_A_sec": _timings.get("Training modello vintage A (Shift1/2 \u2014 Mar-Ven)"),
-    "time_training_vintage_B_sec": _timings.get("Training modello vintage B (Shift3/4 \u2014 Lun/Sab/Dom)"),
     "time_total_sec":       total_elapsed,
     # Output
     "output_file":          str(output_file),

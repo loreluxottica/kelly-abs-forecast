@@ -9,6 +9,10 @@
 # MAGIC
 # MAGIC ## Changelog
 # MAGIC
+# MAGIC ### v1.5 — 2026-07-09 (vintage bounds)
+# MAGIC - **Congelati anche i bound**: `Forecast_Vintage_Lower` / `Forecast_Vintage_Upper` con la stessa
+# MAGIC   logica lag-1 del point — permette di misurare la copertura empirica del PI 90% (schema a 9 colonne).
+# MAGIC
 # MAGIC ### v1.4 — 2026-07-08 (schema standard + intervalli di previsione)
 # MAGIC - **Prediction interval 90%**: `quantiles=[0.05, 0.95]` nel modello; nuove colonne
 # MAGIC   `Forecast_Lower` / `Forecast_Upper` nella Delta table (schema standard 7 colonne per tutte le geografie).
@@ -529,7 +533,8 @@ merged_df = (
     .sort_values(['ds', 'ID'])
     .reset_index(drop=True)
 )
-merged_df['Forecast_Vintage'] = np.nan          # placeholder: popolata dalla cella carry-forward
+for _c in kc.VINTAGE_COLS:
+    merged_df[_c] = np.nan                       # placeholder: popolate dalla cella carry-forward
 merged_df = merged_df[kc.STANDARD_COLS]
 
 # Maschera weekend + festivita' nei forecast (giorni non lavorativi -> NaN)
@@ -567,9 +572,10 @@ merged_df.tail(10)
 # COMMAND ----------
 
 # DBTITLE 1,Cell 31
-# -- Carry-forward Forecast_Vintage da Delta table ---------------------------
-# Congela il Forecast del run precedente (ormai passato) in Forecast_Vintage,
-# mantenendo il vintage gia' accumulato. merged_df conserva i nuovi Forecast/Actual.
+# -- Carry-forward Forecast_Vintage (+ bounds) da Delta table ----------------
+# Congela Forecast/Forecast_Lower/Forecast_Upper del run precedente (ormai
+# passati) nel trio Forecast_Vintage*, mantenendo il vintage gia' accumulato.
+# I bound vintage permettono di misurare la copertura empirica del PI 90%.
 
 from pyspark.sql import functions as F
 
@@ -578,25 +584,24 @@ FREEZE_UNTIL = pd.Timestamp.today().normalize()   # "oggi"; usa max_date per con
 # Carica il vintage precedente dalla Delta table.
 # None SOLO se la tabella non esiste (primo run); ogni altro errore viene rilanciato
 # per non azzerare silenziosamente lo storico Forecast_Vintage.
-prev_df = kc.read_delta_or_none(
-    spark, '`sbx-logistics`.kelly.kelly_da_forecast',
-    columns=['ds', 'ID', 'Forecast_Vintage', 'Forecast'],
-)
-if prev_df is None:
-    prev_df = pd.DataFrame(columns=['ds', 'ID', 'Forecast_Vintage', 'Forecast'])
+# Nessun select esplicito: carry_forward_vintage tollera colonne mancanti (schema vecchio).
+prev_df = kc.read_delta_or_none(spark, '`sbx-logistics`.kelly.kelly_da_forecast')
 
 vintage_all, _vmeta = kc.carry_forward_vintage(prev_df, FREEZE_UNTIL)
 
-# applica al merged_df corrente (sovrascrive il placeholder)
+# applica al merged_df corrente (sovrascrive i placeholder)
 merged_df = (
-    merged_df.drop(columns=['Forecast_Vintage'], errors='ignore')
+    merged_df.drop(columns=kc.VINTAGE_COLS, errors='ignore')
              .merge(vintage_all, on=['ds', 'ID'], how='left')
              [kc.STANDARD_COLS]
              .sort_values(['ds', 'ID']).reset_index(drop=True)
 )
 
 is_nw = (merged_df['ds'].dt.dayofweek >= 5) | merged_df['ds'].isin(all_holidays)
-merged_df.loc[is_nw, 'Forecast_Vintage'] = np.nan
+for _c in kc.VINTAGE_COLS:
+    merged_df.loc[is_nw, _c] = np.nan
+merged_df = kc.mask_bounds_like_point(
+    merged_df, 'Forecast_Vintage', 'Forecast_Vintage_Lower', 'Forecast_Vintage_Upper')
 
 print('Vintage da: Delta table sbx-logistics.kelly.kelly_da_forecast')
 _lvd = _vmeta['last_vintage_date']
@@ -608,8 +613,8 @@ print(f'  vintage totale = {merged_df["Forecast_Vintage"].notna().sum()} punti')
 
 # DBTITLE 1,Cell 32
 # ── Export to Delta Table ──────────────────────────────────────────────────
-# Schema standard 7 colonne (ds, ID, Actual, Forecast_Vintage, Forecast,
-# Forecast_Lower, Forecast_Upper), round(4), overwrite + overwriteSchema.
+# Schema standard 9 colonne (kc.STANDARD_COLS: point + bounds + vintage trio),
+# round(4), overwrite + overwriteSchema.
 _n_rows = kc.write_forecast_table(spark, merged_df, '`sbx-logistics`.kelly.kelly_da_forecast')
 
 print(f'Export completato: sbx-logistics.kelly.kelly_da_forecast ({_n_rows} righe)')

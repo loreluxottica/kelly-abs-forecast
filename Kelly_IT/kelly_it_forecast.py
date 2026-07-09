@@ -12,6 +12,11 @@
 # MAGIC **Custom events:** Apertura Scuole, Chiusura Scuole, Ramadan, Extra Festività
 # MAGIC
 # MAGIC ---
+# MAGIC ### Changelog v3.2 — 2026-07-09 (vintage bounds)
+# MAGIC - **Congelati anche i bound**: `Forecast_Vintage_Lower` / `Forecast_Vintage_Upper` con la stessa
+# MAGIC   logica lag-1 a finestra 4 settimane — misurabile la copertura empirica del PI 90% (schema a 9 colonne).
+# MAGIC   Il seed Excel di bootstrap non ha bound → NaN.
+# MAGIC
 # MAGIC ### Changelog v3.1 — 2026-07-08 (schema standard + intervalli di previsione)
 # MAGIC - **Prediction interval 90%**: `quantiles=[0.05, 0.95]`; nuove colonne `Forecast_Lower`/`Forecast_Upper`
 # MAGIC   nella Delta table (schema standard 7 colonne per tutte le geografie).
@@ -84,7 +89,7 @@ LOG_DIR          = Path(f"{VOLUME_BASE}/logs")
 HISTORY_CSV      = Path(f"{VOLUME_BASE}/reports/kelly_run_history.csv")
 LATEST_MODEL_PKL = OUTPUT_PATH / "kelly_model_latest.pkl"
 
-MODEL_VERSION = "v3.1"
+MODEL_VERSION = "v3.2"
 VINTAGE_WEEKS = 4  # Finestra mobile del Forecast_Vintage accumulato
 
 for p in [OUTPUT_PATH, PLOT_PATH, LOG_DIR, HISTORY_CSV.parent, BASE_PATH]:
@@ -388,12 +393,36 @@ with timed("Post-processing forecast + lag-1 vintage"):
     DELTA_TABLE = "`sbx-logistics`.kelly.kelly_it_forecast"
     SEED_FILE = OUTPUT_PATH / "Kelly_v25_DB_seed.xlsx"
 
-    def _load_previous_forecast_vintage(current_max_date) -> pd.Series | None:
+    def _combine_vintage(prev_df: pd.DataFrame, current_max_date) -> pd.DataFrame:
+        """Vintage accumulato dal df precedente: storico Forecast_Vintage(_Lower/_Upper)
+        + Forecast(_Lower/_Upper) come lag-1, dedup keep='first' (lo storico vince),
+        filtrato sulla finestra mobile VINTAGE_WEEKS. Colonne mancanti -> NaN."""
+        prev_df = prev_df.copy()
+        prev_df["ds"] = pd.to_datetime(prev_df["ds"])
+        for _c in ["Forecast", "Forecast_Lower", "Forecast_Upper"] + kc.VINTAGE_COLS:
+            if _c not in prev_df.columns:
+                prev_df[_c] = np.nan
+            prev_df[_c] = pd.to_numeric(prev_df[_c], errors="coerce")
+
+        hist = prev_df[["ds", "ID"] + kc.VINTAGE_COLS]
+        lag1 = prev_df[["ds", "ID", "Forecast", "Forecast_Lower", "Forecast_Upper"]].rename(
+            columns={"Forecast": "Forecast_Vintage",
+                     "Forecast_Lower": "Forecast_Vintage_Lower",
+                     "Forecast_Upper": "Forecast_Vintage_Upper"})
+        combined = (
+            pd.concat([hist, lag1], ignore_index=True)
+            .dropna(subset=["Forecast_Vintage"])
+            .drop_duplicates(subset=["ds", "ID"], keep="first")
+        )
+        window_start = current_max_date - pd.Timedelta(weeks=VINTAGE_WEEKS)
+        return combined[(combined["ds"] <= current_max_date) & (combined["ds"] > window_start)]
+
+    def _load_previous_forecast_vintage(current_max_date) -> pd.DataFrame | None:
         """
-        Costruisce il Forecast_Vintage ACCUMULATO (finestra mobile di VINTAGE_WEEKS
-        settimane) leggendo dalla Delta table (run precedente).
-        La finestra arriva fino a max_date (ultimo giorno con Actual osservato).
-        Fallback: seed Excel file per bootstrap iniziale.
+        Costruisce il trio Forecast_Vintage(_Lower/_Upper) ACCUMULATO (finestra
+        mobile di VINTAGE_WEEKS settimane) leggendo dalla Delta table (run
+        precedente). La finestra arriva fino a max_date (ultimo giorno con
+        Actual osservato). Fallback: seed Excel per bootstrap iniziale (senza bound).
         """
         # 1) Lettura Delta table (contiene output della run precedente)
         # v3.1 FIX: None SOLO se la tabella non esiste (primo run); ogni altro
@@ -418,52 +447,20 @@ with timed("Post-processing forecast + lag-1 vintage"):
         else:
             log.info("Lag-1 vintage: lettura da Delta table")
 
-        prev_df["ds"] = pd.to_datetime(prev_df["ds"])
+        combined = _combine_vintage(prev_df, current_max_date)
 
-        # 3) Costruisci vintage accumulato: Forecast_Vintage (storico) + Forecast (lag-1)
-        parts = []
-        if "Forecast_Vintage" in prev_df.columns:
-            hist = prev_df[["ds", "ID", "Forecast_Vintage"]].rename(columns={"Forecast_Vintage": "v"})
-            parts.append(hist)
-        if "Forecast" in prev_df.columns:
-            new = prev_df[["ds", "ID", "Forecast"]].rename(columns={"Forecast": "v"})
-            parts.append(new)
-
-        if not parts:
-            return None
-
-        combined = pd.concat(parts, ignore_index=True)
-        combined["v"] = pd.to_numeric(combined["v"], errors="coerce")
-        combined = (
-            combined.dropna(subset=["v"])
-            .drop_duplicates(subset=["ds", "ID"], keep="first")
-        )
-
-        # 4) Filtra finestra mobile (fino a max_date, non split_date)
-        window_start = current_max_date - pd.Timedelta(weeks=VINTAGE_WEEKS)
-        combined = combined[(combined["ds"] <= current_max_date) & (combined["ds"] > window_start)]
-
-        # 5) Se dopo il filtro non ci sono righe e il seed esiste, usa il seed (bootstrap)
+        # 3) Se dopo il filtro non ci sono righe e il seed esiste, usa il seed (bootstrap)
         if combined.empty and SEED_FILE.exists() and source != "seed":
             log.info("Lag-1 vintage: Delta non ha dati nella finestra — fallback a seed file")
-            prev_df = pd.read_excel(SEED_FILE, parse_dates=["ds"])
-            prev_df["ds"] = pd.to_datetime(prev_df["ds"])
-            parts = []
-            if "Forecast_Vintage" in prev_df.columns:
-                parts.append(prev_df[["ds", "ID", "Forecast_Vintage"]].rename(columns={"Forecast_Vintage": "v"}))
-            if "Forecast" in prev_df.columns:
-                parts.append(prev_df[["ds", "ID", "Forecast"]].rename(columns={"Forecast": "v"}))
-            if parts:
-                combined = pd.concat(parts, ignore_index=True)
-                combined["v"] = pd.to_numeric(combined["v"], errors="coerce")
-                combined = combined.dropna(subset=["v"]).drop_duplicates(subset=["ds", "ID"], keep="first")
-                combined = combined[(combined["ds"] <= current_max_date) & (combined["ds"] > window_start)]
+            combined = _combine_vintage(
+                pd.read_excel(SEED_FILE, parse_dates=["ds"]), current_max_date)
 
+        window_start = current_max_date - pd.Timedelta(weeks=VINTAGE_WEEKS)
         log.info(
             f"Lag-1 vintage accumulato: {len(combined)} righe "
             f"({window_start.date()} → {current_max_date.date()}, finestra {VINTAGE_WEEKS} settimane)"
         )
-        return combined.set_index(["ds", "ID"])["v"]
+        return combined
 
     lag1_vintage = _load_previous_forecast_vintage(max_date)
 
@@ -472,11 +469,16 @@ with timed("Post-processing forecast + lag-1 vintage"):
         .merge(df_forecast[["ds", "ID", "Forecast", "Forecast_Lower", "Forecast_Upper"]], on=["ds", "ID"], how="outer")
         .rename(columns={"y": "Actual"})
     )
-    merged_df["Forecast_Vintage"] = np.nan
+    for _c in kc.VINTAGE_COLS:
+        merged_df[_c] = np.nan
 
-    if lag1_vintage is not None:
-        idx = pd.MultiIndex.from_arrays([merged_df["ds"], merged_df["ID"]])
-        merged_df["Forecast_Vintage"] = lag1_vintage.reindex(idx).values
+    if lag1_vintage is not None and len(lag1_vintage) > 0:
+        merged_df = (
+            merged_df.drop(columns=kc.VINTAGE_COLS)
+                     .merge(lag1_vintage, on=["ds", "ID"], how="left")
+        )
+    merged_df = kc.mask_bounds_like_point(
+        merged_df, "Forecast_Vintage", "Forecast_Vintage_Lower", "Forecast_Vintage_Upper")
 
     merged_df = merged_df[kc.STANDARD_COLS]
 
