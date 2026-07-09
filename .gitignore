@@ -1,0 +1,20 @@
+# Artefatti di training NeuralProphet / PyTorch-Lightning
+lightning_logs/
+lrfind/
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+
+# Export/output locali (gli output prod vivono su Delta/UC Volumes)
+*.xlsx
+*.csv
+Outputs/
+
+# Scratch Databricks
+Untitled*.py
+
+# OS
+Thumbs.db
+.DS_Store
