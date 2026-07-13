@@ -289,10 +289,13 @@ log.info(f"Colonne: {list(df_raw.columns)}")
 # DBTITLE 1,Input validation
 # ── Validazione input ──────────────────────────────────────────────────────────────
 # Microsoft Teams Incoming Webhook URL — v2.8: da secret scope 'kelly'
-TEAMS_WEBHOOK_URL = dbutils.secrets.get(scope="kelly", key="teams_webhook_url")
+# TEAMS_WEBHOOK_URL = dbutils.secrets.get(scope="kelly", key="teams_webhook_url")
+TEAMS_WEBHOOK_URL = None  # temporaneamente disabilitato (secret scope da configurare)
 
 def _notify_teams(title: str, message: str, color: str = "FF0000"):
     """Invia notifica al canale Teams via Incoming Webhook (helper condiviso)."""
+    if not TEAMS_WEBHOOK_URL:
+        return
     kc.notify_teams(TEAMS_WEBHOOK_URL, title, message,
                     job="Kelly_ATL", notebook="kelly_atl_forecast", log=log)
 

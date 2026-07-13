@@ -18,8 +18,8 @@
 # MAGIC - `n_lags=21` (~3 settimane) | `n_forecasts=30` (~30 giorni) | `freq='D'` (plant opera 7/7)
 # MAGIC - `quantiles=[0.05, 0.95]` → `Forecast_Lower`/`Forecast_Upper` (PI 90%, v3.1)
 # MAGIC - Custom events: **Carnaval_Tijuana, Semana_Santa, Fiestas_Patrias** (date esatte, ±1 giorno)  
-# MAGIC - Output: Delta Table `` `sbx-logistics`.`kelly-abs-forecast`.kelly_mx_forecast `` (Power BI)
-# MAGIC - Checkpoint: `/Volumes/sbx-logistics/kelly-abs-forecast/kelly_mx_volume/checkpoints/`
+# MAGIC - Output: Delta Table `` `sbx-logistics`.kelly.kelly_mx_forecast_CI `` (Power BI)  
+# MAGIC - Checkpoint: `/Volumes/sbx-logistics/kelly/kelly_mx_volume/checkpoints/`
 # MAGIC
 # MAGIC ---
 # MAGIC
@@ -94,7 +94,7 @@ print('Libraries loaded.')
 from neuralprophet import set_random_seed
 
 # ── Paths (Unity Catalog Volumes) ──
-VOLUME_BASE    = kc.volume_base("mx")
+VOLUME_BASE    = "/Volumes/sbx-logistics/kelly/kelly_mx_volume"
 OUTPUT_PATH    = Path(f"{VOLUME_BASE}/output")
 CHECKPOINT_DIR = Path(f"{VOLUME_BASE}/checkpoints")
 LOG_DIR        = Path(f"{VOLUME_BASE}/logs")
@@ -183,10 +183,13 @@ print(f'Clerk univ.: {df_raw["Clerk"].nunique()}')
 from datetime import datetime
 
 # Microsoft Teams Incoming Webhook URL — v3.1: da secret scope 'kelly'
-TEAMS_WEBHOOK_URL = dbutils.secrets.get(scope="kelly", key="teams_webhook_url")
+# TEAMS_WEBHOOK_URL = dbutils.secrets.get(scope="kelly", key="teams_webhook_url")
+TEAMS_WEBHOOK_URL = None  # temporaneamente disabilitato (secret scope da configurare)
 
 def _notify_teams(title: str, message: str):
     """Invia notifica al canale Teams via Incoming Webhook (helper condiviso)."""
+    if not TEAMS_WEBHOOK_URL:
+        return
     kc.notify_teams(TEAMS_WEBHOOK_URL, title, message,
                     job="Kelly_MX", notebook="kelly_mx_forecast")
 
@@ -486,7 +489,7 @@ RUN_ID  = _RUN_TS.strftime('%Y%m%d_%H%M%S')
 try:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 except OSError:
-    spark.sql(f"CREATE VOLUME IF NOT EXISTS {kc.SCHEMA_QUALIFIED}.kelly_mx_volume")
+    spark.sql("CREATE VOLUME IF NOT EXISTS `sbx-logistics`.kelly.kelly_mx_volume")
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 _ckpt_current = CHECKPOINT_DIR / f'kelly_mx_current_{RUN_ID}.pkl'
@@ -564,7 +567,7 @@ print(f'Forecast: {df_forecast["ds"].min().date()} -> {df_forecast["ds"].max().d
 # non Forecast. Ora estraiamo vintage per-shift dalla zona forecast del
 # run precedente.
 # =============================================================================
-TABLE_NAME = kc.forecast_table('mx')
+TABLE_NAME = '`sbx-logistics`.kelly.kelly_mx_forecast_CI'
 
 # 1. Leggi forecast precedente dalla Delta table.
 # v3.1 FIX: None SOLO se la tabella non esiste (primo run); ogni altro errore
