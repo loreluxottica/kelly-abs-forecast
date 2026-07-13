@@ -26,9 +26,15 @@ la versione vive solo in `MODEL_VERSION` dentro il codice.
 
 Brasile rimosso dal repo (2026-07-09): pipeline non piu mantenuta qui; decommissionare gli eventuali job Databricks (forecast + ETL BronzeToSilver).
 
+## Location Unity Catalog
+
+Tabelle e volumi vivono in **`sbx-logistics`.`kelly-abs-forecast`** (catalogo/schema centralizzati in
+`kelly_common.CATALOG` / `SCHEMA` — helper `kc.forecast_table(geo)` e `kc.volume_base(geo)`, unico punto
+da cambiare per spostare tutto). Il vecchio schema `kelly` non viene piu scritto.
+
 ## Prerequisiti (one-off)
 
-Secret scope `kelly` su Databricks con chiavi `jdbc_user`, `jdbc_password`, `teams_webhook_url`:
+1. Secret scope `kelly` su Databricks con chiavi `jdbc_user`, `jdbc_password`, `teams_webhook_url`:
 
 ```
 databricks secrets create-scope kelly
@@ -36,6 +42,10 @@ databricks secrets put-secret kelly jdbc_user
 databricks secrets put-secret kelly jdbc_password
 databricks secrets put-secret kelly teams_webhook_url
 ```
+
+2. Eseguire **una volta** `common/setup_schema_kelly_abs_forecast.py` su Databricks: crea i 5 volumi nel
+   nuovo schema, copia i file dai vecchi volumi e semina le 5 Delta table dal vecchio schema
+   (lo storico `Forecast_Vintage` continua). Poi `common/smoke_test_kelly_common.py`, poi i job.
 
 ## Decisione: notebook, non script
 

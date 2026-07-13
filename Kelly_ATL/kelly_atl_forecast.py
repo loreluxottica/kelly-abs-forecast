@@ -12,7 +12,7 @@
 # MAGIC   - Holiday country: US
 # MAGIC   - Eventi: Easter/Good Friday (calcolati), Eid al-Fitr, Super Bowl, NBA Finals, World Series, March Madness, US Open Tennis, School Start/End
 # MAGIC   - Quality flag: semaforo diagnostico (🟢/🟡/🔴) basato su verdetti General_A/B — non bloccante
-# MAGIC   - Output: CSV + Delta table (`sbx-logistics`.kelly.kelly_atl_forecast) per Power BI
+# MAGIC   - Output: CSV + Delta table (`sbx-logistics`.`kelly-abs-forecast`.kelly_atl_forecast) per Power BI
 # MAGIC
 # MAGIC ---
 # MAGIC ### Changelog
@@ -143,7 +143,7 @@ if torch.cuda.is_available():
 # =============================================================================
 # PERCORSI — Unity Catalog Volumes
 # =============================================================================
-VOLUME_BASE = "/Volumes/sbx-logistics/kelly/kelly_atl_volume"
+VOLUME_BASE = kc.volume_base("atl")
 
 OUTPUT_PATH     = Path(f"{VOLUME_BASE}/output")
 REPORT_PATH     = Path(f"{VOLUME_BASE}/reports")
@@ -324,7 +324,7 @@ if df_raw["present_hc_with_ot"].max() <= 1:
 _max_raw_date = pd.to_datetime(df_raw["dt"]).max()
 _days_stale = kc.check_staleness(
     _max_raw_date, max_days=14,
-    source_desc="il file CSV in /Volumes/sbx-logistics/kelly/kelly_atl_volume/input/",
+    source_desc=f"il file CSV in {VOLUME_BASE}/input/",
     notify=lambda title, msg: _notify_teams(f"KELLY ATL — {title}", msg),
     log=log,
 )
@@ -775,7 +775,7 @@ with timed("Post-processing forecast + vintage lag-1"):
     # Congela Forecast(_Lower/_Upper) del run precedente per le date trascorse
     # nel trio Forecast_Vintage*, mantenendo il vintage gia' accumulato.
     FREEZE_UNTIL = pd.Timestamp.today().normalize()
-    prev_df = kc.read_delta_or_none(spark, "`sbx-logistics`.kelly.kelly_atl_forecast")
+    prev_df = kc.read_delta_or_none(spark, kc.forecast_table("atl"))
     vintage_all, _vmeta = kc.carry_forward_vintage(prev_df, FREEZE_UNTIL)
 
     merged_df = (
@@ -1084,7 +1084,7 @@ log.info(f"Dati salvati: {output_file}")
 # (kc.STANDARD_COLS: point + bounds + vintage trio), round(4),
 # overwrite + overwriteSchema.
 _n_rows = kc.write_forecast_table(spark, merged_df.assign(Actual=_actual_out),
-                                  "`sbx-logistics`.kelly.kelly_atl_forecast")
+                                  kc.forecast_table("atl"))
 log.info(f"Delta table kelly_atl_forecast scritta: {_n_rows} righe")
 
 # COMMAND ----------

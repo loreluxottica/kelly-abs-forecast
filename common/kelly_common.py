@@ -19,6 +19,24 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+# ── Location Unity Catalog ───────────────────────────────────────────────────
+# Unica fonte di verita' per catalogo/schema: tabelle e volumi di TUTTE le
+# geografie vivono qui. Lo schema ha trattini -> backtick negli identifier SQL.
+CATALOG = "sbx-logistics"
+SCHEMA = "kelly-abs-forecast"
+SCHEMA_QUALIFIED = f"`{CATALOG}`.`{SCHEMA}`"
+
+
+def forecast_table(geo: str) -> str:
+    """'atl' -> `sbx-logistics`.`kelly-abs-forecast`.kelly_atl_forecast"""
+    return f"{SCHEMA_QUALIFIED}.kelly_{geo}_forecast"
+
+
+def volume_base(geo: str) -> str:
+    """'atl' -> /Volumes/sbx-logistics/kelly-abs-forecast/kelly_atl_volume"""
+    return f"/Volumes/{CATALOG}/{SCHEMA}/kelly_{geo}_volume"
+
+
 # ── Costanti standard ────────────────────────────────────────────────────────
 # Intervallo di previsione 90% (quantile regression NeuralProphet)
 QUANTILES = [0.05, 0.95]

@@ -153,11 +153,11 @@ print("✓ check_staleness")
 
 # ── read_delta_or_none (solo su Databricks) ──
 # Tabella inesistente -> None (primo run); errori diversi -> raise.
-assert kc.read_delta_or_none(spark, "`sbx-logistics`.kelly.tabella_che_non_esiste_xyz") is None
+assert kc.read_delta_or_none(spark, f"{kc.SCHEMA_QUALIFIED}.tabella_che_non_esiste_xyz") is None
 print("✓ read_delta_or_none: tabella mancante -> None")
 
 # Tabella reale -> DataFrame
-_t = kc.read_delta_or_none(spark, "`sbx-logistics`.kelly.kelly_da_forecast")
+_t = kc.read_delta_or_none(spark, kc.forecast_table("da"))
 print("kelly_da_forecast:", None if _t is None else _t.shape)
 
 # COMMAND ----------
