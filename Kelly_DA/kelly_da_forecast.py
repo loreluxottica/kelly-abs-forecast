@@ -155,7 +155,7 @@ print('Libraries loaded.')
 # COMMAND ----------
 
 from pathlib import Path
-BASE_PATH = Path(kc.volume_base('da')) / 'input'
+BASE_PATH = Path('/Volumes/sbx-logistics/kelly/kelly_da_volume/input')
 
 FILE_HISTORICAL = BASE_PATH / 'Historical_2023_2025.csv'
 FILE_CURRENT    = BASE_PATH / 'Dallas & Columbus DC Absenteeism 2026.csv'
@@ -585,7 +585,7 @@ FREEZE_UNTIL = pd.Timestamp.today().normalize()   # "oggi"; usa max_date per con
 # None SOLO se la tabella non esiste (primo run); ogni altro errore viene rilanciato
 # per non azzerare silenziosamente lo storico Forecast_Vintage.
 # Nessun select esplicito: carry_forward_vintage tollera colonne mancanti (schema vecchio).
-prev_df = kc.read_delta_or_none(spark, kc.forecast_table('da'))
+prev_df = kc.read_delta_or_none(spark, '`sbx-logistics`.kelly.kelly_da_forecast_CI')
 
 vintage_all, _vmeta = kc.carry_forward_vintage(prev_df, FREEZE_UNTIL)
 
@@ -603,7 +603,7 @@ for _c in kc.VINTAGE_COLS:
 merged_df = kc.mask_bounds_like_point(
     merged_df, 'Forecast_Vintage', 'Forecast_Vintage_Lower', 'Forecast_Vintage_Upper')
 
-print(f'Vintage da: Delta table {kc.forecast_table("da")}')
+print('Vintage da: Delta table sbx-logistics.kelly.kelly_da_forecast_CI')
 _lvd = _vmeta['last_vintage_date']
 print(f'  last_vintage_date = {_lvd.date() if pd.notna(_lvd) else "N/A"} | punti congelati = {_vmeta["n_frozen"]}')
 print(f'  vintage totale = {merged_df["Forecast_Vintage"].notna().sum()} punti')
@@ -615,9 +615,9 @@ print(f'  vintage totale = {merged_df["Forecast_Vintage"].notna().sum()} punti')
 # ── Export to Delta Table ──────────────────────────────────────────────────
 # Schema standard 9 colonne (kc.STANDARD_COLS: point + bounds + vintage trio),
 # round(4), overwrite + overwriteSchema.
-_n_rows = kc.write_forecast_table(spark, merged_df, kc.forecast_table('da'))
+_n_rows = kc.write_forecast_table(spark, merged_df, '`sbx-logistics`.kelly.kelly_da_forecast_CI')
 
-print(f'Export completato: {kc.forecast_table("da")} ({_n_rows} righe)')
+print(f'Export completato: sbx-logistics.kelly.kelly_da_forecast_CI ({_n_rows} righe)')
 
 
 # COMMAND ----------
@@ -1165,3 +1165,4 @@ print(f'Export completato: {kc.forecast_table("da")} ({_n_rows} righe)')
 # plt.savefig(EVAL_DIR / 'eval_8w_v131_actual_vs_forecast.png', dpi=150, bbox_inches='tight')
 # plt.show()
 # print('Plot salvato.')
+

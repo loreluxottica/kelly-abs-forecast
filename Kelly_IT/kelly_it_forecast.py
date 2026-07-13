@@ -80,7 +80,7 @@ print('Libraries loaded.')
 # PERCORSI — adattati per Databricks (Unity Catalog Volumes)
 # Su Windows usava OneDrive; qui si usa il volume UC.
 # =============================================================================
-VOLUME_BASE = kc.volume_base("it")
+VOLUME_BASE = "/Volumes/sbx-logistics/kelly/kelly_it_volume"
 
 BASE_PATH        = Path(f"{VOLUME_BASE}/input")
 OUTPUT_PATH      = Path(f"{VOLUME_BASE}/output")
@@ -390,7 +390,7 @@ with timed("Post-processing forecast + lag-1 vintage"):
     df_forecast = kc.mask_bounds_like_point(df_forecast)
 
     # --- Lag-1 Vintage: lettura da Delta table (con fallback a seed Excel) ---
-    DELTA_TABLE = kc.forecast_table("it")
+    DELTA_TABLE = "`sbx-logistics`.kelly.kelly_it_forecast_CI"
     SEED_FILE = OUTPUT_PATH / "Kelly_v25_DB_seed.xlsx"
 
     def _combine_vintage(prev_df: pd.DataFrame, current_max_date) -> pd.DataFrame:
@@ -713,7 +713,7 @@ log.info(f"merged_df: {merged_df.shape}")
 # =============================================================================
 # 13. SALVATAGGIO SU DELTA TABLE
 # =============================================================================
-OUTPUT_TABLE = kc.forecast_table("it")
+OUTPUT_TABLE = "`sbx-logistics`.kelly.kelly_it_forecast_CI"
 
 with timed("Salvataggio su Delta table"):
     # v3.1: schema standard 7 colonne, round(4), overwrite + overwriteSchema
@@ -764,3 +764,4 @@ log.info(f"✅ Tabella {OUTPUT_TABLE} salvata con {_n_rows} righe")
 
 # log.info(f"History aggiornata: {HISTORY_CSV}")
 # log.info(f"✅ Script completato in {total_elapsed}s.")
+

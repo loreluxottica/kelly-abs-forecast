@@ -101,7 +101,7 @@ print('Libraries loaded.')
 
 # COMMAND ----------
 
-BASE_PATH = f"{kc.volume_base('col')}/input"
+BASE_PATH = '/Volumes/sbx-logistics/kelly/kelly_col_volume/input'
 
 # Sorgenti dati
 FILE_HISTORICAL = f'{BASE_PATH}/Historical_Columbus_2023_2025.csv'
@@ -724,7 +724,7 @@ merged_df.tail(10)
 # merged_df conserva i nuovi Forecast (futuro) e Actual.
 import re
 
-OUTPUT_TABLE = kc.forecast_table("col")
+OUTPUT_TABLE = "`sbx-logistics`.kelly.kelly_col_forecast_CI"
 FREEZE_UNTIL = pd.Timestamp.today().normalize()   # "oggi"; usa max_date per congelare solo dove c'e' actual
 
 def _run_date(p):
@@ -1093,3 +1093,4 @@ print(f'Salvato su tabella Delta: {OUTPUT_TABLE} ({_n_rows} righe)')
 # plt.savefig(EVAL_DIR / 'eval_8w_columbus_v13_h7_actual_vs_forecast.png', dpi=150, bbox_inches='tight')
 # plt.show()
 # print('Plot salvato.')
+
