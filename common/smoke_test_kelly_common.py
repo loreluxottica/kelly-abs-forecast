@@ -1,8 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "5"
-# ///
 # MAGIC %md
 # MAGIC # Smoke test — common/kelly_common.py
 # MAGIC Verifica gli helper condivisi su dati sintetici prima del rollout nei 5 notebook.
@@ -155,10 +151,8 @@ print("✓ check_staleness")
 
 # COMMAND ----------
 
-# DBTITLE 1,Cell 11
 # ── read_delta_or_none (solo su Databricks) ──
 # Tabella inesistente -> None (primo run); errori diversi -> raise.
-import importlib; importlib.reload(kc)
 assert kc.read_delta_or_none(spark, f"{kc.SCHEMA_QUALIFIED}.tabella_che_non_esiste_xyz") is None
 print("✓ read_delta_or_none: tabella mancante -> None")
 
@@ -170,8 +164,6 @@ print("kelly_da_forecast:", None if _t is None else _t.shape)
 
 # ── Verifica nomi colonne quantile della versione NP installata ──
 # Primo task di smoke su Databricks: un predict minimale e stampa colonne.
-
-
 from neuralprophet import NeuralProphet
 
 _rng = pd.date_range("2024-01-01", periods=200, freq="D")
