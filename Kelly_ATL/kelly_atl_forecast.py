@@ -275,7 +275,7 @@ script_start = time.perf_counter()
 #     df_raw.columns = df_raw.columns.str.strip()
 # --- Fine JDBC ---
 
-INPUT_CSV = Path(f"{VOLUME_BASE}/input/Absenteeism.csv")
+INPUT_CSV = Path(f"{kc.input_volume_base('atl')}/input/Absenteeism.csv")
 
 with timed("Caricamento dati da CSV (Volume)"):
     df_raw = pd.read_csv(INPUT_CSV)
@@ -327,7 +327,7 @@ if df_raw["present_hc_with_ot"].max() <= 1:
 _max_raw_date = pd.to_datetime(df_raw["dt"]).max()
 _days_stale = kc.check_staleness(
     _max_raw_date, max_days=14,
-    source_desc=f"il file CSV in {VOLUME_BASE}/input/",
+    source_desc=f"il file CSV in {kc.input_volume_base('atl')}/input/",
     notify=lambda title, msg: _notify_teams(f"KELLY ATL — {title}", msg),
     log=log,
 )

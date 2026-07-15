@@ -155,7 +155,7 @@ print('Libraries loaded.')
 # COMMAND ----------
 
 from pathlib import Path
-BASE_PATH = Path(kc.volume_base('da')) / 'input'
+BASE_PATH = Path(kc.input_volume_base('da')) / 'input'
 
 FILE_HISTORICAL = BASE_PATH / 'Historical_2023_2025.csv'
 FILE_CURRENT    = BASE_PATH / 'Dallas & Columbus DC Absenteeism 2026.csv'

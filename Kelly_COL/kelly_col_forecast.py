@@ -101,7 +101,7 @@ print('Libraries loaded.')
 
 # COMMAND ----------
 
-BASE_PATH = f"{kc.volume_base('col')}/input"
+BASE_PATH = f"{kc.input_volume_base('col')}/input"
 
 # Sorgenti dati
 FILE_HISTORICAL = f'{BASE_PATH}/Historical_Columbus_2023_2025.csv'

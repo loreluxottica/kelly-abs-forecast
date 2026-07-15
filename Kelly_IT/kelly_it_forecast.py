@@ -82,7 +82,7 @@ print('Libraries loaded.')
 # =============================================================================
 VOLUME_BASE = kc.volume_base("it")
 
-BASE_PATH        = Path(f"{VOLUME_BASE}/input")
+BASE_PATH        = Path(f"{kc.input_volume_base('it')}/input")  # input IT: vecchio schema `kelly`
 OUTPUT_PATH      = Path(f"{VOLUME_BASE}/output")
 PLOT_PATH        = Path(f"{VOLUME_BASE}/plots")
 LOG_DIR          = Path(f"{VOLUME_BASE}/logs")
@@ -92,7 +92,7 @@ LATEST_MODEL_PKL = OUTPUT_PATH / "kelly_model_latest.pkl"
 MODEL_VERSION = "v3.2"
 VINTAGE_WEEKS = 4  # Finestra mobile del Forecast_Vintage accumulato
 
-for p in [OUTPUT_PATH, PLOT_PATH, LOG_DIR, HISTORY_CSV.parent, BASE_PATH]:
+for p in [OUTPUT_PATH, PLOT_PATH, LOG_DIR, HISTORY_CSV.parent]:  # BASE_PATH: sorgente read-only gestita da IT
     try:
         p.mkdir(parents=True, exist_ok=True)
     except OSError:

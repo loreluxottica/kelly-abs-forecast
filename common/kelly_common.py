@@ -37,6 +37,19 @@ def volume_base(geo: str) -> str:
     return f"/Volumes/{CATALOG}/{SCHEMA}/kelly_{geo}_volume"
 
 
+# ── Input volumes (temporaneo) ───────────────────────────────────────────────
+# Lo script automatico di IT scrive ancora l'input nei volumi del VECCHIO schema
+# `kelly`; finche' non viene ripuntato al nuovo schema, l'INPUT si legge da li'.
+# Output/log/tabelle restano nel nuovo schema (li scrivono i notebook stessi).
+# Revert: puntare INPUT_SCHEMA a SCHEMA una volta sistemato lo script IT.
+INPUT_SCHEMA = "kelly"
+
+
+def input_volume_base(geo: str) -> str:
+    """'atl' -> /Volumes/sbx-logistics/kelly/kelly_atl_volume (input IT, vecchio schema)."""
+    return f"/Volumes/{CATALOG}/{INPUT_SCHEMA}/kelly_{geo}_volume"
+
+
 # ── Costanti standard ────────────────────────────────────────────────────────
 # Intervallo di previsione 90% (quantile regression NeuralProphet)
 QUANTILES = [0.05, 0.95]
